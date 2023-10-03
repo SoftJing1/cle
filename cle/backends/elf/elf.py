@@ -669,6 +669,106 @@ class ELF(MetaELF):
                     self.addr_to_line[relocated_addr] = set()
                 self.addr_to_line[relocated_addr].add((str(filename), line.state.line))
 
+    #------------ added by jingyu ----------------
+    #generate low and high pc if not provided 
+    
+    class low_high_pc:
+        from enum import Enum
+        from elftools.dwarf.compileunit import CompileUnit
+
+        def __init__(self, cu:CompileUnit, dwarf:DWARFInfo):
+            self.cu = cu
+            self.dwarf = dwarf
+        
+        def get(self):
+            return self.load_from_cu()
+        
+        class range_type(Enum):
+            NOT_PRESENT = 0
+            INVALID = 1
+            CONTINUOUS = 2
+            NON_CONTINUOUS = 3
+        
+        '''
+            Used to retrieve the range type of a DIE based on its attributes.
+            Valid address range can be either continuous or non-continuous, 
+            defined by DW_AT_low_pc and DW_AT_high_pc or DW_AT_ranges.
+        '''
+        def get_range_type(self, die:DIE) -> range_type:
+            if 'DW_AT_high_pc' in die.attributes:
+                if 'DW_AT_low_pc' in die.attributes:
+                    return self.range_type.CONTINUOUS
+                else:
+                    return self.range_type.INVALID
+            else:
+                if 'DW_AT_ranges' in die.attributes:
+                    return self.range_type.NON_CONTINUOUS
+                else:
+                    return self.range_type.NOT_PRESENT
+        
+        '''
+            Determine the low_pc and high_pc of a compilation unit.
+            If top DIE contains the information, retrieve it from DW_AT_low_pc 
+            DW_AT_high_pc or DW_AT_ranges.
+            Otherwise, retrieve it from the children DIEs.
+        '''
+        def load_from_cu(self) -> (int, int):
+            top_die = self.cu.get_top_DIE()
+            rtype = self.get_range_type(top_die)
+
+            if rtype == self.range_type.CONTINUOUS or rtype == self.range_type.NON_CONTINUOUS:
+                return self.load_from_DIE(top_die)
+            
+            else:
+                # should retrieve from children DIEs, but not implemented yet
+                log.warning("Cannot retrieve low_pc and high_pc from children DIEs, not supported")
+                return None, None
+
+        '''
+            Determine the low_pc and high_pc of a single DIE.
+            Based on the information of DIE attribute DW_AT_low_pc, 
+            DW_AT_high_pc and DW_AT_ranges (if any).
+        '''
+        def load_from_DIE(self, die:DIE) -> (int, int):
+            rtype = self.get_range_type(die)
+
+            if rtype == self.range_type.CONTINUOUS:
+                return ELF._load_low_high_pc_form_die(die)
+            
+            elif rtype == self.range_type.NON_CONTINUOUS:
+                return self.load_from_DIE_ranges(die)
+            
+            else:
+                return None, None
+        '''
+            Special handle for DW_AT_ranges.
+            Iterate through the range list and find the min and max address.
+        '''
+        def load_from_DIE_ranges(self, die:DIE) -> (int, int):
+            range_lists = self.dwarf.range_lists()
+            offset = die.attributes['DW_AT_ranges'].value
+            range_list = range_lists.get_range_list_at_offset(offset)
+
+            low_pc = None
+            high_pc = None
+            for rng in range_list:
+                if low_pc is None or rng.begin_offset < low_pc:
+                    low_pc = rng.begin_offset
+                if high_pc is None or rng.end_offset > high_pc:
+                    high_pc = rng.end_offset
+            
+            return low_pc, high_pc
+
+        '''
+            subprogram is one of the possible children of compilation unit that
+            contains low_pc and high_pc information. This function retrieves the
+            information from subprogram.
+        '''
+        def load_from_DIE_subprogram(self, die:DIE):
+            pass
+        
+    #------------ added by jingyu ----------------
+            
     @staticmethod
     def _load_low_high_pc_form_die(die: DIE):
         """
@@ -732,7 +832,8 @@ class ELF(MetaELF):
 
             die_name = top_die.attributes.get("DW_AT_name", None)
             die_comp_dir = top_die.attributes.get("DW_AT_comp_dir", None)
-            die_low_pc, die_high_pc = self._load_low_high_pc_form_die(top_die)
+            # die_low_pc, die_high_pc = self._load_low_high_pc_form_die(top_die) #------------ removed by jingyu ----------------
+            die_low_pc, die_high_pc = self.low_high_pc(cu, dwarf).get() #------------ added by jingyu ----------------
             die_lang = top_die.attributes.get("DW_AT_language", None)
 
             if (
